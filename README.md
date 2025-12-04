@@ -50,12 +50,11 @@ USER_DATA_DIR = r"C:\Users\<YOU>\ChromeSeleniumProfile"
 PROFILE_DIR   = "Default"
 ```
 Both variable names must match exactly:
-USER_DATA_DIR → your folder path
-PROFILE_DIR → usually "Default"
+* USER_DATA_DIR → your folder path
+* PROFILE_DIR → usually "Default"
 
 ### 3. Usage
 
-First Run
 ```bash
 python src\main_selenium.py
 ```
@@ -77,13 +76,13 @@ Results are saved to: data/output.csv
 
 ### 6. Files
 
-src/main_selenium.py           # main script
-data/output.csv                # results
-data/debug_after_nav.html      # debug snapshots
+* src/main_selenium.py           # main script
+* data/output.csv                # results
+* data/debug_after_nav.html      # debug snapshots
 
 ### 7. Notes
 
-Safe: The script never opens profile pages → no notifications sent.
-Debug: HTML is sanitized so VS Code shows no errors.
-Troubleshooting: If results look empty, delete the profile folder & re-login once.
+* Safe: The script never opens profile pages → no notifications sent.
+* Debug: HTML is sanitized so VS Code shows no errors.
+* Troubleshooting: If results look empty, delete the profile folder & re-login once.
 
