@@ -34,7 +34,7 @@ DEBUG_DIR = "data"
 DELAY_MIN = 0.6
 DELAY_MAX = 1.2
 SCROLL_PAUSES = 6
-USER_DATA_DIR = r"C:\Users\Sirisha G\ChromeSeleniumProfile"  # change if needed
+USER_DATA_DIR = os.path.expanduser("~/.config/Selenium/ChromeProfile") # change if needed
 PROFILE_DIR = "Default"
 MAX_RECORDS = 200
 CSV_FIELDS = ["profile_url", "name", "location", "current_role", "current_company"]
@@ -58,24 +58,20 @@ def clear_output_csv():
             pass
 
 # CSV pretty writer using ", " and safe quoting
-def _quote_field_for_pretty_csv(s):
-    s = "" if s is None else str(s)
-    if any(ch in s for ch in [',', '\n', '"']):
-        s = s.replace('"', '""')
-        return f'"{s}"'
-    return s
-
 def append_pretty_csv_row(csv_path, row_dict, fieldnames=CSV_FIELDS):
+    """
+    Write a single row to CSV using csv.DictWriter with a fixed header order.
+    This ensures the output file always has the same columns and proper quoting.
+    """
     ensure_data_dir(csv_path)
     write_header = not os.path.exists(csv_path)
     with open(csv_path, "a", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction='ignore', quoting=csv.QUOTE_MINIMAL)
         if write_header:
-            header_line = ", ".join(_quote_field_for_pretty_csv(h) for h in fieldnames)
-            fh.write(header_line + "\n")
-        values = [row_dict.get(fn, "") for fn in fieldnames]
-        line = ", ".join(_quote_field_for_pretty_csv(v) for v in values)
-        fh.write(line + "\n")
-    print("[SAVED]", row_dict.get("profile_url") or row_dict.get("name"))
+            writer.writeheader()
+        out = {fn: (row_dict.get(fn) or "") for fn in fieldnames}
+        writer.writerow(out)
+    print("[SAVED]", out.get("profile_url") or out.get("name"))
 
 def build_search_url(keyword):
     q = quote_plus(keyword)
@@ -196,6 +192,84 @@ def extract_current_from_text(text):
         first = text.split('|',1)[0].strip()
         return _clean_text(first), ""
     return "", ""
+
+
+def strip_name_and_titles_from_company(comp, name):
+    """Remove obvious person-name fragments and titles from a company string.
+    Returns cleaned company or empty string if it looks like a person name.
+    """
+    if not comp:
+        return comp
+    s = comp
+    # remove surrounding quotes
+    s = re.sub(r'^[\"\']|[\"\']$', '', s).strip()
+    # remove common titles followed by a name (Dr. John Doe)
+    s = re.sub(r'\b(dr|mr|ms|mrs|miss|prof)\.?\s+[A-Z][\w\.\- ]{1,80}', '', s, flags=re.I)
+    # remove explicit name tokens that match the extracted name
+    if name:
+        for token in name.split():
+            if len(token) > 2:
+                s = re.sub(re.escape(token), '', s, flags=re.I)
+    # collapse separators
+    s = re.sub(r'[\|\·\•\-\–\—]+', ' ', s)
+    s = re.sub(r'\s+', ' ', s).strip(' ,;:-"\'')
+
+    # company keywords to prefer when extracting company name
+    COMPANY_KEYWORDS = [
+        'amazon','infosys','tcs','wipro','tcs','tata','capgemini','accenture','google','microsoft','ibm','hcl','tech','infosys','bpm','springboard'
+    ]
+
+    low = s.lower()
+    for kw in COMPANY_KEYWORDS:
+        m = re.search(r'\b' + re.escape(kw) + r'\b', low)
+        if m:
+            # try to keep the token containing the keyword and its nearby words (up to two following words)
+            words = s.split()
+            # find index of matched keyword in words (case-insensitive)
+            idx = next((i for i,w in enumerate(words) if re.search(r'\b' + re.escape(kw) + r'\b', w, flags=re.I)), None)
+            if idx is not None:
+                # include keyword and up to 2 following tokens unless they look like person names (single capitalized tokens)
+                end = idx + 1
+                allowed_suffix = set(['web','services','technologies','solutions','systems','springboard','bpm','labs','group'])
+                for j in range(idx+1, min(len(words), idx+4)):
+                    w = re.sub(r'[.,]$','', words[j])
+                    loww = w.lower()
+                    if loww in allowed_suffix or re.search(r'^[A-Z][a-z]+$', w):
+                        end = j+1
+                        continue
+                    break
+                candidate = ' '.join(words[:end]) if idx==0 else ' '.join(words[idx:end])
+                candidate = candidate.strip(' ,;:-"\'')
+                return candidate
+
+    # fallback: remove trailing person-like fragments at end (e.g., 'Amazon Faustin Kabeya' -> 'Amazon')
+    parts = s.split()
+    def is_person_token(tok):
+        return bool(re.match(r'^[A-Z][a-z\-\.]+$', tok)) and len(tok) > 1
+
+    # if last two tokens look like person name tokens, drop them
+    if len(parts) >= 2 and is_person_token(parts[-1]) and is_person_token(parts[-2]):
+        return ' '.join(parts[:-2]).strip(' ,;:-"\'')
+
+    # if last one token looks like person and the remaining contains company keyword, drop last
+    if len(parts) >= 2 and is_person_token(parts[-1]):
+        lowrest = ' '.join(parts[:-1]).lower()
+        if any(kw in lowrest for kw in COMPANY_KEYWORDS):
+            return ' '.join(parts[:-1]).strip(' ,;:-"\'')
+
+    # if still looks like a person's name (2-4 capitalized words) with no company keywords, return empty
+    def looks_like_person(s2):
+        parts2 = [p for p in s2.split() if p]
+        if not parts2:
+            return False
+        capcount = sum(1 for p in parts2 if re.match(r'^[A-Z]', p))
+        if capcount >= 2 and len(parts2) <= 4 and not re.search(r'\b(inc|ltd|llp|pvt|llc|technologies|systems|solutions|services|bpm|springboard|infosys|wipro|tcs|google|microsoft|amazon|accenture|capgemini)\b', s2, flags=re.I):
+            return True
+        return False
+
+    if looks_like_person(s):
+        return ""
+    return s
 
 def _save_debug_html(path, page_source):
     """
@@ -430,9 +504,59 @@ def parse_search_results(html):
                     current_role = role
                     current_company = comp
                 else:
+                    # Try multiple heuristics on the raw text lines to extract role/company
                     role, comp = extract_current_from_text(text_block)
                     current_role = role
                     current_company = comp
+
+                    if not current_role and not current_company and lines:
+                        # scan several nearby lines for 'role at company' patterns
+                        for ln in lines[1:6]:
+                            r2, c2 = extract_current_from_text(ln)
+                            if r2 or c2:
+                                if not current_role:
+                                    current_role = r2
+                                if not current_company:
+                                    current_company = c2
+                                break
+
+                    # pattern: 'Role · Company' or 'Company · Role'
+                    if (not current_role or not current_company) and lines:
+                        for ln in lines[:6]:
+                            m = re.split(r'\s+·\s+|\s+•\s+|\s+\|\s+', ln)
+                            if len(m) == 2:
+                                a, b = m[0].strip(), m[1].strip()
+                                # heuristics: shorter phrase with capitals likely a name/role, all-caps or multiword company-like is company
+                                def looks_like_company(s):
+                                    if not s: return False
+                                    keywords = ['inc','ltd','llp','pvt','llc','technologies','systems','solutions','services','infosys','wipro','tcs','google','microsoft','amazon','accenture','capgemini','bpm']
+                                    low = s.lower()
+                                    if any(k in low for k in keywords):
+                                        return True
+                                    # company tends to be multiple words and contain capitalized words
+                                    if len(s.split()) >= 2 and re.search(r'[A-Z]', s):
+                                        return True
+                                    return False
+
+                                if looks_like_company(a) and not current_company:
+                                    current_company = _clean_text(a)
+                                if looks_like_company(b) and not current_company:
+                                    current_company = _clean_text(b)
+                                # if a contains role-like words
+                                if not current_role and re.search(r'\b(manager|engineer|specialist|consultant|director|analyst|lead|officer|developer|architect)\b', a, flags=re.I):
+                                    current_role = _clean_text(a)
+                                if not current_role and re.search(r'\b(manager|engineer|specialist|consultant|director|analyst|lead|officer|developer|architect)\b', b, flags=re.I):
+                                    current_role = _clean_text(b)
+                                if current_role or current_company:
+                                    break
+
+                    # fallback: if company still empty, find possible company-like short lines
+                    if not current_company and lines:
+                        for ln in lines[1:6]:
+                            low = ln.lower()
+                            if any(k in low for k in ['inc','ltd','llp','pvt','llc','solutions','technologies','systems']) or re.search(r'\b( infosys | wipro | tcs | accenture | capgemini | google | microsoft | amazon )\b', ' '+low+' '):
+                                current_company = _clean_text(ln)
+                                break
 
             # clean fields
             name = name or ""
@@ -448,6 +572,8 @@ def parse_search_results(html):
             if current_company:
                 parts = re.split(r'\s+and\s+|,|\s{2,}', current_company, flags=re.I)
                 current_company = _clean_text(parts[0].strip())
+                # remove any embedded person-name fragments such as 'Dr. Name' or the extracted name
+                current_company = strip_name_and_titles_from_company(current_company, name)
 
             rec = {
                 "profile_url": profile_url or "",
@@ -550,6 +676,9 @@ def scrape_keyword(keyword, headless=False, limit_records=MAX_RECORDS):
             if key in seen:
                 continue
             seen.add(key)
+            # only include this person if at least one of location/role/company is present
+            if not (r.get("location") or r.get("current_role") or r.get("current_company")):
+                continue
             cleaned_rec = {
                 "profile_url": r.get("profile_url","") or "n/a",
                 "name": r.get("name","") or "n/a",

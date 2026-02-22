@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>LinkedIn Scraper — UI</title>
+    <link href="/static/css/style.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="header">
+        <div class="brand">
+          <svg width="36" height="36" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden>
+            <rect x="2" y="2" width="20" height="20" rx="6" fill="#6D28D9" />
+            <path d="M7 13c1-2 3-3 5-3s4 1 5 3" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <div>
+            <div class="app-name">LinkedIn Search Scraper</div>
+            <div class="app-desc">Scrapes public search-result cards only — no profile views.</div>
+          </div>
+        </div>
+      </header>
+
+      <main class="container">
+        <section class="panel">
+          <form id="scrapeForm" class="grid">
+            <div class="field">
+                <label class="label">Search keywords</label>
+                <input id="keyword" name="keyword" placeholder="e.g. Sales Manager India" required>
+              </div>
+
+              <div class="field">
+                <label class="label">Max records</label>
+                <input id="limit" name="limit" type="number" min="1" placeholder="(default 200)">
+              </div>
+
+              <div class="field actions-row">
+                <label class="checkbox">
+                  <input id="headless" name="headless" type="checkbox">
+                  <span>Run in background (headless)</span>
+                </label>
+
+                <button id="runBtn" class="primary">Run Scraper</button>
+              </div>
+          </form>
+
+          <div class="status-row">
+              <div class="status-bubble">
+                <span class="status-dot idle" aria-hidden></span>
+                <span id="message" class="status-text">Status: Idle</span>
+              </div>
+              <div id="downloadArea" class="download hidden"><a id="downloadLink" href="/download">Download output.csv</a></div>
+          </div>
+          
+          <!-- results panel moved outside the panel to allow full-window width -->
+        </section>
+      </main>
+
+    <footer class="footer">Built for private use — only scrapes public search results.</footer>
+    </div>
+
+    <!-- Results panel placed outside the centered wrap so it can use full window width -->
+    <div id="resultsPanel" class="results-panel hidden">
+      <div class="results-wrap">
+        <h3>Results</h3>
+        <div class="results-actions">
+          <a id="downloadLink2" class="download-link hidden" href="/download">Download CSV</a>
+        </div>
+        <div id="resultsTableWrap" class="results-table-wrap">
+          <table id="resultsTable" class="results-table">
+            <thead id="resultsHead"></thead>
+            <tbody id="resultsBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+  </body>
+</html>
