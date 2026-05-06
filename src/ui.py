@@ -15,7 +15,7 @@ else:
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
-# CRITICAL FIX FOR RENDER: Tell Gunicorn to also look inside the 'src' folder!
+# CRITICAL FIX FOR RENDER
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
@@ -124,6 +124,14 @@ def download():
     if not os.path.exists(os.path.join(data_dir, "output.csv")):
         return jsonify({"status": "error", "message": "No output file yet"}), 404
     return send_from_directory(directory=data_dir, path="output.csv", as_attachment=True)
+
+# NEW ROUTE: Allows you to instantly see why LinkedIn blocked you
+@app.route("/debug")
+def download_debug():
+    data_dir = os.path.join(BASE_DIR, "data")
+    if not os.path.exists(os.path.join(data_dir, "debug_no_results.html")):
+        return jsonify({"status": "error", "message": "No debug file found yet. Run the scraper first!"}), 404
+    return send_from_directory(directory=data_dir, path="debug_no_results.html", as_attachment=True)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))

@@ -97,9 +97,7 @@ def start_driver(headless=False):
         options.add_argument("--headless=new")
         options.add_argument("--window-size=1920,1080")
     
-    # ----------------------------------------------------
     # AGGRESSIVE MEMORY OPTIMIZATIONS FOR RENDER FREE TIER
-    # ----------------------------------------------------
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
@@ -107,19 +105,16 @@ def start_driver(headless=False):
     options.add_argument("--disable-software-rasterizer")
     options.add_argument("--blink-settings=imagesEnabled=false") # CRITICAL: Don't load heavy images
     
-    # --- ULTIMATE ANTI-BOT & HEADLESS DETECTION BYPASS ---
+    # ULTIMATE ANTI-BOT & HEADLESS DETECTION BYPASS
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option('useAutomationExtension', False)
-    options.add_argument("--accept-lang=en-US,en;q=0.9") # Spoof typical browser language headers
-    
-    # Spoof a real Windows Chrome browser so LinkedIn doesn't know we are on a headless cloud server
+    options.add_argument("--accept-lang=en-US,en;q=0.9") 
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
     
     service = Service()
     driver = webdriver.Chrome(service=service, options=options)
     
-    # Execute Chrome DevTools Protocol to completely wipe out the webdriver signature
     try:
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
             "source": """
@@ -134,7 +129,6 @@ def start_driver(headless=False):
     return driver
 
 def load_cookies(driver, default_cookie_path):
-    # Detect if we are running in Render Docker and use the secret mount path
     cookie_path = default_cookie_path
     if os.environ.get("RENDER") and os.path.exists("/etc/secrets/cookies.json"):
         cookie_path = "/etc/secrets/cookies.json"
@@ -149,14 +143,21 @@ def load_cookies(driver, default_cookie_path):
             count = 0
             for cookie in cookies:
                 try:
-                    if 'domain' in cookie and not cookie['domain'].endswith('linkedin.com'):
+                    # FIX: Forcefully remove bad formatting from browser extensions so Selenium accepts them
+                    if 'domain' in cookie and 'linkedin.com' not in cookie['domain']:
                         continue
+                    
+                    cookie.pop('sameSite', None)
+                    cookie.pop('storeId', None)
+                    cookie.pop('hostOnly', None)
+                    cookie.pop('session', None)
+                    
                     driver.add_cookie(cookie)
                     count += 1
-                except Exception:
+                except Exception as e:
                     pass
             driver.refresh()
-            time.sleep(2)
+            time.sleep(3)
             print(f"[INFO] Successfully injected {count} cookies!", flush=True)
         else:
             print(f"[WARN] No cookie file found at {cookie_path}! Proceeding without login.", flush=True)
