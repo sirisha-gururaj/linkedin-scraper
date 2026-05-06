@@ -69,9 +69,9 @@ def start():
         return jsonify({"status": "error", "message": "Keyword required"}), 400
 
     try:
-        limit = int(data.get("limit_records") or ms.MAX_RECORDS)
+        limit = int(data.get("limit_records") or getattr(ms, "MAX_RECORDS", 200))
     except Exception:
-        limit = ms.MAX_RECORDS
+        limit = getattr(ms, "MAX_RECORDS", 200)
 
     headless = bool(data.get("headless", False))
     
@@ -79,8 +79,8 @@ def start():
     if os.environ.get("RENDER") or os.path.exists("/.dockerenv"):
         headless = True
 
-    user_data_dir = data.get("user_data_dir") or ms.USER_DATA_DIR
-    profile_dir = data.get("profile_dir") or ms.PROFILE_DIR
+    user_data_dir = data.get("user_data_dir") or getattr(ms, "USER_DATA_DIR", None)
+    profile_dir = data.get("profile_dir") or getattr(ms, "PROFILE_DIR", None)
 
     t = threading.Thread(target=_run_scraper_thread, args=(keyword, headless, limit, user_data_dir, profile_dir), daemon=True)
     t.start()
