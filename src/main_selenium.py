@@ -106,7 +106,13 @@ def start_driver(headless=False):
     options.add_argument("--disable-extensions")
     options.add_argument("--disable-software-rasterizer")
     options.add_argument("--blink-settings=imagesEnabled=false") # CRITICAL: Don't load heavy images
-    options.page_load_strategy = 'eager' # Don't wait for tracking scripts/ads to load
+    
+    # --- ANTI-BOT & HEADLESS DETECTION BYPASS ---
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option('useAutomationExtension', False)
+    # Spoof a real Windows Chrome browser so LinkedIn doesn't know we are on a headless cloud server
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
     
     service = Service()
     return webdriver.Chrome(service=service, options=options)
