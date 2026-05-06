@@ -7,3 +7,5 @@ chromedriver-autoinstaller
 
 # Web UI
 flask
+gunicorn
+groq

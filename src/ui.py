@@ -1,20 +1,21 @@
 from flask import Flask, render_template, request, jsonify, send_from_directory
 import threading
 import os
-import time
 import csv
-
-import os
 import sys
 
-# Ensure project root is on sys.path so this file can be run directly
-BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+# Bulletproof path resolving (works whether run from src/ or root)
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if os.path.basename(current_dir) == "src":
+    BASE_DIR = os.path.abspath(os.path.join(current_dir, ".."))
+else:
+    BASE_DIR = current_dir
+
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 import main_selenium as ms
 
-# Point Flask to the project's top-level `templates` and `static` folders
 TEMPLATES_PATH = os.path.join(BASE_DIR, "templates")
 STATIC_PATH = os.path.join(BASE_DIR, "static")
 app = Flask(__name__, static_folder=STATIC_PATH, template_folder=TEMPLATES_PATH)
@@ -25,7 +26,6 @@ run_state = {
     "last_count": 0
 }
 
-
 def _run_scraper_thread(keyword, headless, limit_records, user_data_dir, profile_dir):
     run_state["running"] = True
     run_state["message"] = "Starting..."
@@ -34,20 +34,24 @@ def _run_scraper_thread(keyword, headless, limit_records, user_data_dir, profile
             ms.USER_DATA_DIR = user_data_dir
         if profile_dir:
             ms.PROFILE_DIR = profile_dir
-        run_state["message"] = "Launching browser..."
+        
+        run_state["message"] = "Launching browser & loading cookies..."
+        print(f"\n[INFO] Starting scraper thread for keyword: '{keyword}'", flush=True)
+        
         results = ms.scrape_keyword(keyword, headless=headless, limit_records=limit_records)
+        
         run_state["last_count"] = len(results or [])
         run_state["message"] = f"Finished. Parsed {run_state['last_count']} records."
+        print(f"[INFO] Thread finished successfully. Found {run_state['last_count']} records.", flush=True)
     except Exception as e:
         run_state["message"] = f"Error: {e}"
+        print(f"[ERROR] Scraper thread crashed: {e}", flush=True)
     finally:
         run_state["running"] = False
-
 
 @app.route("/")
 def index():
     return render_template("index.html")
-
 
 @app.route("/start", methods=["POST"])
 def start():
@@ -60,11 +64,16 @@ def start():
         return jsonify({"status": "error", "message": "Keyword required"}), 400
 
     try:
-        limit = int(data.get("limit_records", ms.MAX_RECORDS))
+        limit = int(data.get("limit_records") or ms.MAX_RECORDS)
     except Exception:
         limit = ms.MAX_RECORDS
 
     headless = bool(data.get("headless", False))
+    
+    # Auto-force Headless when deployed to Render
+    if os.environ.get("RENDER") or os.path.exists("/.dockerenv"):
+        headless = True
+
     user_data_dir = data.get("user_data_dir") or ms.USER_DATA_DIR
     profile_dir = data.get("profile_dir") or ms.PROFILE_DIR
 
@@ -73,27 +82,21 @@ def start():
 
     return jsonify({"status": "started"})
 
-
 @app.route("/status")
 def status():
     return jsonify(run_state)
 
-
 @app.route("/results")
 def results():
-    path = os.path.join(os.getcwd(), "data")
-    filename = os.path.basename(ms.OUTPUT_CSV)
-    full = os.path.join(path, filename)
+    full = os.path.join(BASE_DIR, "data", "output.csv")
     if not os.path.exists(full):
-        return jsonify({"status":"error","message":"No output file"}), 404
+        return jsonify({"status":"error","message":"No output file found. Check the terminal for errors."}), 404
+    
     rows = []
     try:
         with open(full, newline='', encoding='utf-8') as f:
             reader = csv.DictReader(f)
             for r in reader:
-                # csv.DictReader may produce a None key for extra columns
-                # (when a row has more values than headers). Clean such rows
-                # so they contain only string keys and values before JSONifying.
                 cleaned = {}
                 extra_parts = []
                 for k, v in r.items():
@@ -101,25 +104,22 @@ def results():
                         if v is not None:
                             extra_parts.append(str(v))
                         continue
-                    # normalize None values to empty string
                     cleaned[str(k)] = "" if v is None else v
                 if extra_parts:
                     cleaned["_extra"] = " | ".join(extra_parts)
                 rows.append(cleaned)
     except Exception as e:
         return jsonify({"status":"error","message":str(e)}), 500
+    
     return jsonify({"status":"ok","rows":rows})
-
 
 @app.route("/download")
 def download():
-    path = os.path.join(os.getcwd(), "data")
-    filename = os.path.basename(ms.OUTPUT_CSV)
-    if not os.path.exists(ms.OUTPUT_CSV):
+    data_dir = os.path.join(BASE_DIR, "data")
+    if not os.path.exists(os.path.join(data_dir, "output.csv")):
         return jsonify({"status": "error", "message": "No output file yet"}), 404
-    return send_from_directory(directory=path, path=filename, as_attachment=True)
-
+    return send_from_directory(directory=data_dir, path="output.csv", as_attachment=True)
 
 if __name__ == "__main__":
-    # Run dev server
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port, debug=False)

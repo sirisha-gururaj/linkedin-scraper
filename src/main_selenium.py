@@ -1,45 +1,66 @@
 # src/main_selenium.py
-"""
-LinkedIn public search scraper (Selenium)
-- DOES NOT visit individual profile pages (no view notifications)
-- Clears data/output.csv at start of each run
-- Parses search-results page and extracts: profile_url, name, location, current_role, current_company
-- Writes 'n/a' for missing fields
-- Uses ', ' (comma + space) as separator and safely quotes fields containing commas/newlines/quotes
-- Improved heuristics to extract location reliably from search-result cards
-"""
 import os
 import time
 import random
 import csv
 import re
+import json
 import traceback
 from urllib.parse import urljoin, quote_plus
-from bs4 import BeautifulSoup, Doctype
+from bs4 import BeautifulSoup
+from dotenv import load_dotenv
 
-# Selenium imports
 import chromedriver_autoinstaller
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, WebDriverException
+from selenium.common.exceptions import TimeoutException
+
+# Securely load environment variables from .env file
+load_dotenv()
+
+# Optional AI Integration via Groq
+try:
+    from groq import Groq
+    GROQ_AVAILABLE = True
+except ImportError:
+    GROQ_AVAILABLE = False
 
 chromedriver_autoinstaller.install()
 
-# CONFIG
-OUTPUT_CSV = os.path.join("data", "output.csv")
-DEBUG_DIR = "data"
+# Absolute path resolution logic
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if os.path.basename(current_dir) == "src":
+    BASE_DIR = os.path.abspath(os.path.join(current_dir, ".."))
+else:
+    BASE_DIR = current_dir
+
+# --- AI CONFIGURATION ---
+USE_AI_PARSER = True  # Set to True to use Groq AI for perfect text extraction
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+# ------------------------
+
+OUTPUT_CSV = os.path.join(BASE_DIR, "data", "output.csv")
+DEBUG_DIR = os.path.join(BASE_DIR, "data")
+COOKIE_FILE = os.path.join(BASE_DIR, "cookies.json")
+
 DELAY_MIN = 0.6
 DELAY_MAX = 1.2
 SCROLL_PAUSES = 6
-USER_DATA_DIR = os.path.expanduser("~/.config/Selenium/ChromeProfile") # change if needed
+USER_DATA_DIR = os.path.expanduser("~/.config/Selenium/ChromeProfile")
 PROFILE_DIR = "Default"
 MAX_RECORDS = 200
 CSV_FIELDS = ["profile_url", "name", "location", "current_role", "current_company"]
 
-COUNTRY_PREFER = ["India", "United States", "USA", "United Kingdom", "UK", "Bengaluru", "Bangalore", "Karnataka"]
+COMMON_LOCATIONS = [
+    "Bengaluru", "Bangalore", "Hyderabad", "Pune", "Mumbai", "New Delhi", "Delhi", 
+    "Gurugram", "Gurgaon", "Noida", "Chennai", "Kolkata", "Ahmedabad", "Karnataka", 
+    "Maharashtra", "Telangana", "India", "United States", "USA", "UK", "United Kingdom", 
+    "London", "New York", "San Francisco", "Seattle", "Chicago", "Boston", "Austin", "Texas", "California",
+    "Kochi", "Trivandrum", "Chandigarh", "Jaipur", "Indore", "Coimbatore", "Bhubaneswar", "Nagpur", "Lucknow"
+]
 
 def polite_sleep():
     time.sleep(random.uniform(DELAY_MIN, DELAY_MAX))
@@ -53,16 +74,11 @@ def clear_output_csv():
     if os.path.exists(OUTPUT_CSV):
         try:
             os.remove(OUTPUT_CSV)
-            print(f"[INFO] Removed existing {OUTPUT_CSV}")
+            print(f"[INFO] Cleared previous output at {OUTPUT_CSV}", flush=True)
         except Exception:
             pass
 
-# CSV pretty writer using ", " and safe quoting
 def append_pretty_csv_row(csv_path, row_dict, fieldnames=CSV_FIELDS):
-    """
-    Write a single row to CSV using csv.DictWriter with a fixed header order.
-    This ensures the output file always has the same columns and proper quoting.
-    """
     ensure_data_dir(csv_path)
     write_header = not os.path.exists(csv_path)
     with open(csv_path, "a", encoding="utf-8", newline="") as fh:
@@ -71,13 +87,13 @@ def append_pretty_csv_row(csv_path, row_dict, fieldnames=CSV_FIELDS):
             writer.writeheader()
         out = {fn: (row_dict.get(fn) or "") for fn in fieldnames}
         writer.writerow(out)
-    print("[SAVED]", out.get("profile_url") or out.get("name"))
+    print(f"[SAVED] {out.get('name') or 'n/a'} | {out.get('profile_url')}", flush=True)
 
 def build_search_url(keyword):
     q = quote_plus(keyword)
     return f"https://www.linkedin.com/search/results/people/?keywords={q}&origin=GLOBAL_SEARCH_HEADER"
 
-def start_driver(headless=False, use_persistent_profile=True, user_data_dir=None, profile_dir="Default"):
+def start_driver(headless=False, use_persistent_profile=False):
     options = webdriver.ChromeOptions()
     if headless:
         options.add_argument("--headless=new")
@@ -86,293 +102,193 @@ def start_driver(headless=False, use_persistent_profile=True, user_data_dir=None
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-extensions")
-    options.add_argument("--no-first-run")
-    options.add_argument("--no-default-browser-check")
-    options.add_argument("--remote-debugging-port=9222")
-    options.add_argument("--window-size=1920,1080")
-
-    possible_binary = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
-    if os.path.exists(possible_binary):
-        options.binary_location = possible_binary
-
-    if use_persistent_profile and user_data_dir:
-        options.add_argument(f"--user-data-dir={user_data_dir}")
-        options.add_argument(f"--profile-directory={profile_dir}")
-        print(f"[INFO] Using persistent Chrome profile: user-data-dir={user_data_dir}, profile={profile_dir}")
-    else:
-        print("[INFO] Using temporary Selenium profile (no persistence).")
-
+    
     service = Service()
-    driver = webdriver.Chrome(service=service, options=options)
-    return driver
+    return webdriver.Chrome(service=service, options=options)
+
+def load_cookies(driver, cookie_path):
+    print(f"[INFO] Loading cookies from: {cookie_path}", flush=True)
+    try:
+        driver.get("https://www.linkedin.com")
+        time.sleep(2)
+        if os.path.exists(cookie_path):
+            with open(cookie_path, "r") as f:
+                cookies = json.load(f)
+            count = 0
+            for cookie in cookies:
+                try:
+                    if 'domain' in cookie and not cookie['domain'].endswith('linkedin.com'):
+                        continue
+                    driver.add_cookie(cookie)
+                    count += 1
+                except Exception:
+                    pass
+            driver.refresh()
+            time.sleep(2)
+            print(f"[INFO] Successfully injected {count} cookies!", flush=True)
+        else:
+            print(f"[WARN] No cookie file found at {cookie_path}! Proceeding without login.", flush=True)
+    except Exception as e:
+        print(f"[ERROR] Failed to load cookies: {e}", flush=True)
 
 def looks_like_login_page(driver):
     title = driver.title.lower() if driver.title else ""
-    src = driver.page_source.lower()[:3000]
-    if "sign in" in title or "sign in" in src:
+    if "sign in" in title or "login" in title:
         return True
     try:
-        if driver.find_elements(By.NAME, "session_key"):
+        if driver.find_elements(By.NAME, "session_key") or driver.find_elements(By.ID, "username"):
             return True
     except Exception:
         pass
     return False
-
-def prompt_manual_login(driver):
-    if not looks_like_login_page(driver):
-        return True
-    print("\n[ACTION REQUIRED] LinkedIn is asking you to sign in in the opened browser window.")
-    print("Please sign in manually, then come back to this terminal and press Enter.")
-    ensure_data_dir(DEBUG_DIR + "/debug_before_manual_login.html")
-    with open(os.path.join(DEBUG_DIR, "debug_before_manual_login.html"), "w", encoding="utf-8") as fh:
-        fh.write(driver.page_source)
-    try:
-        input("Press Enter after you have logged in (or Ctrl+C to abort)...")
-    except KeyboardInterrupt:
-        return False
-    time.sleep(1.5)
-    try:
-        driver.refresh()
-        time.sleep(2.0)
-    except Exception:
-        pass
-    with open(os.path.join(DEBUG_DIR, "debug_after_manual_login.html"), "w", encoding="utf-8") as fh:
-        fh.write(driver.page_source)
-    return True
 
 def scroll_page(driver, times=SCROLL_PAUSES):
     for i in range(times):
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(0.8 + i * 0.2)
 
-# helpers for cleaning
+# --- AI PARSING ENGINE (USING GROQ) ---
+def parse_with_ai(raw_text):
+    if not GROQ_AVAILABLE or not GROQ_API_KEY:
+        return None
+    
+    try:
+        client = Groq(api_key=GROQ_API_KEY)
+        prompt = f"""
+        Analyze the messy LinkedIn profile text below and extract the person's details.
+        Return ONLY a valid JSON object with EXACTLY these four keys: "name", "current_role", "current_company", "location".
+        If a field cannot be safely determined, output "n/a" for that field.
+
+        CRITICAL Formatting Rules:
+        1. "name": Clean full name ONLY. No prefixes, titles, or suffixes (e.g., return "John Doe", not "Dr. John Doe Ph.D").
+        2. "current_role": ONLY the core job title (e.g., "Software Engineer", "Manager"). NEVER include the company name, department, or locations here. Remove anything after a hyphen (-), pipe (|), or "at".
+        3. "current_company": ONLY the primary company name. Strip out "Inc", "LLC", "Pvt", "Ltd", or any city names attached to it.
+        4. "location": ONLY the primary city name (e.g., "Bengaluru", "San Francisco"). Strip out all states, countries, or regions like "Karnataka", "India", "Greater", "Area".
+        
+        Raw Text:
+        {raw_text}
+        """
+        
+        response = client.chat.completions.create(
+            model="llama3-8b-8192",  # Fast and excellent for JSON extraction
+            messages=[
+                {"role": "system", "content": "You are a strict data extraction assistant. You output ONLY valid JSON format."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.0,
+            response_format={"type": "json_object"}
+        )
+        
+        content = response.choices[0].message.content.strip()
+        data = json.loads(content)
+        return data
+    except Exception as e:
+        print(f"[WARN] Groq AI Parsing failed: {e}", flush=True)
+        return None
+# --------------------------------------
+
 def _clean_text(s):
-    if not s:
-        return ""
-    s = re.sub(r'[\u2022•]', ' ', s)  # bullets
-    s = re.sub(r'\b(is a mutual connection|is a mutual|mutual connection)\b', ' ', s, flags=re.I)
-    s = re.sub(r'(?i)\b\d+(st|nd|rd|th)\+?\b', ' ', s)  # 2nd, 3rd
-    s = re.sub(r'\b(followers|follower)\b', ' ', s, flags=re.I)
-    s = re.sub(r'\b(Connect|Message|Follow|Following)\b', ' ', s, flags=re.I)
-    s = re.sub(r'\s+', ' ', s).strip(' ,;:-')
-    return s.strip()
+    if not s: return ""
+    s = re.sub(r'\s+', ' ', s)
+    s = re.sub(r'\b(is a mutual connection|mutual connection|followers|follower|Connect|Message|Follow)\b', ' ', s, flags=re.I)
+    return re.sub(r'\s+', ' ', s).strip(' ,;:-•·|')
 
 def extract_name_from_text(s):
-    if not s:
-        return ""
+    if not s: return ""
     s = _clean_text(s)
+    s = re.sub(r'[\u2022•·]', '', s) 
     if "\n" in s:
         s = s.split("\n", 1)[0].strip()
-    s = re.split(r'\||\(|\-|\,\s*(Current|Past|at\s|Connect|Message)', s, flags=re.I)[0].strip()
-    m = re.search(r'\b[A-Z][\w\.\-]*(?:\s+[A-Z][\w\.\-]*){0,3}\b', s)
+    s = re.split(r'\||\(|\-|\,\s*(Current|Past|at\s)', s, flags=re.I)[0].strip()
+    m = re.search(r'\b[A-Za-z][\w\.\-]*(?:\s+[A-Za-z][\w\.\-]*){0,3}\b', s)
     if m:
-        name = m.group(0).strip()
-        if len(name.split()) <= 4:
-            return name
-    parts = s.split()
-    return " ".join(parts[:2]) if parts else ""
+        return m.group(0).strip()
+    return " ".join(s.split()[:2])
 
 def extract_current_from_text(text):
-    if not text:
-        return "", ""
-    text = _clean_text(text)
+    if not text: return "", ""
+    text = re.sub(r'\s+', ' ', text) 
+    
+    role, company = "", ""
     m = re.search(r'Current[:\s\-]*\s*(.+?)\s+at\s+(.+)', text, flags=re.I)
     if m:
-        role = m.group(1).strip()
-        company = m.group(2).strip()
-        company = re.split(r'\s{2,}|,|and\b|\band\b|•|followers', company, flags=re.I)[0].strip()
-        return _clean_text(role), _clean_text(company)
-    m2 = re.search(r'(.{1,80}?)\s+at\s+([A-Z0-9][\w &\.-]{1,150})', text)
-    if m2:
-        role = m2.group(1).strip()
-        company = m2.group(2).strip()
-        company = re.split(r'\s{2,}|,|and\b|\band\b|•|followers', company, flags=re.I)[0].strip()
-        return _clean_text(role), _clean_text(company)
-    if '|' in text:
-        first = text.split('|',1)[0].strip()
-        return _clean_text(first), ""
-    return "", ""
+        role, company = m.group(1), m.group(2)
+    else:
+        m2 = re.search(r'(.{1,80}?)\s+at\s+([A-Z0-9][\w &\.-]{1,150})', text)
+        if m2:
+            role, company = m2.group(1), m2.group(2)
+        elif '|' in text:
+            role = text.split('|')[0]
+        elif ' - ' in text:
+            role = text.split(' - ')[0]
+            
+    if company:
+        company = re.split(r'\s{2,}|,|and\b|\band\b|•|·|\|', company, flags=re.I)[0]
+        
+    return _clean_text(role), _clean_text(company)
 
+def clean_role_name(role):
+    if not role: return ""
+    role = re.sub(r'\s+', ' ', role).strip()
+    role = re.split(r'\s*[|•·,]\s*|\s+at\s+|\s+[-–—]\s+', role, flags=re.I)[0]
+    return role.strip(' ,;-')
 
-def strip_name_and_titles_from_company(comp, name):
-    """Remove obvious person-name fragments and titles from a company string.
-    Returns cleaned company or empty string if it looks like a person name.
-    """
-    if not comp:
-        return comp
-    s = comp
-    # remove surrounding quotes
-    s = re.sub(r'^[\"\']|[\"\']$', '', s).strip()
-    # remove common titles followed by a name (Dr. John Doe)
-    s = re.sub(r'\b(dr|mr|ms|mrs|miss|prof)\.?\s+[A-Z][\w\.\- ]{1,80}', '', s, flags=re.I)
-    # remove explicit name tokens that match the extracted name
-    if name:
-        for token in name.split():
-            if len(token) > 2:
-                s = re.sub(re.escape(token), '', s, flags=re.I)
-    # collapse separators
-    s = re.sub(r'[\|\·\•\-\–\—]+', ' ', s)
-    s = re.sub(r'\s+', ' ', s).strip(' ,;:-"\'')
+def separate_company_location(company_str, loc_str):
+    if not company_str:
+        return "", loc_str
+    
+    company_str = re.sub(r'\s+', ' ', company_str).strip()
+    loc_str = re.sub(r'\s+', ' ', loc_str).strip() if loc_str else ""
+    
+    if loc_str and loc_str.lower() != "n/a":
+        city = loc_str.split(',')[0].strip()
+        pattern = r'\s+' + re.escape(city) + r'\s*$'
+        company_str = re.sub(pattern, '', company_str, flags=re.I)
 
-    # company keywords to prefer when extracting company name
-    COMPANY_KEYWORDS = [
-        'amazon','infosys','tcs','wipro','tcs','tata','capgemini','accenture','google','microsoft','ibm','hcl','tech','infosys','bpm','springboard'
-    ]
-
-    low = s.lower()
-    for kw in COMPANY_KEYWORDS:
-        m = re.search(r'\b' + re.escape(kw) + r'\b', low)
+    sorted_locs = sorted(COMMON_LOCATIONS, key=len, reverse=True)
+    for loc in sorted_locs:
+        pattern = r'\s+(' + re.escape(loc) + r')\s*$'
+        m = re.search(pattern, company_str, flags=re.I)
         if m:
-            # try to keep the token containing the keyword and its nearby words (up to two following words)
-            words = s.split()
-            # find index of matched keyword in words (case-insensitive)
-            idx = next((i for i,w in enumerate(words) if re.search(r'\b' + re.escape(kw) + r'\b', w, flags=re.I)), None)
-            if idx is not None:
-                # include keyword and up to 2 following tokens unless they look like person names (single capitalized tokens)
-                end = idx + 1
-                allowed_suffix = set(['web','services','technologies','solutions','systems','springboard','bpm','labs','group'])
-                for j in range(idx+1, min(len(words), idx+4)):
-                    w = re.sub(r'[.,]$','', words[j])
-                    loww = w.lower()
-                    if loww in allowed_suffix or re.search(r'^[A-Z][a-z]+$', w):
-                        end = j+1
-                        continue
-                    break
-                candidate = ' '.join(words[:end]) if idx==0 else ' '.join(words[idx:end])
-                candidate = candidate.strip(' ,;:-"\'')
-                return candidate
+            extracted_loc = m.group(1)
+            company_str = company_str[:m.start()].strip(' ,;-|•·')
+            if not loc_str or loc_str == "n/a":
+                loc_str = extracted_loc
+            break
+            
+    return company_str, loc_str
 
-    # fallback: remove trailing person-like fragments at end (e.g., 'Amazon Faustin Kabeya' -> 'Amazon')
-    parts = s.split()
-    def is_person_token(tok):
-        return bool(re.match(r'^[A-Z][a-z\-\.]+$', tok)) and len(tok) > 1
-
-    # if last two tokens look like person name tokens, drop them
-    if len(parts) >= 2 and is_person_token(parts[-1]) and is_person_token(parts[-2]):
-        return ' '.join(parts[:-2]).strip(' ,;:-"\'')
-
-    # if last one token looks like person and the remaining contains company keyword, drop last
-    if len(parts) >= 2 and is_person_token(parts[-1]):
-        lowrest = ' '.join(parts[:-1]).lower()
-        if any(kw in lowrest for kw in COMPANY_KEYWORDS):
-            return ' '.join(parts[:-1]).strip(' ,;:-"\'')
-
-    # if still looks like a person's name (2-4 capitalized words) with no company keywords, return empty
-    def looks_like_person(s2):
-        parts2 = [p for p in s2.split() if p]
-        if not parts2:
-            return False
-        capcount = sum(1 for p in parts2 if re.match(r'^[A-Z]', p))
-        if capcount >= 2 and len(parts2) <= 4 and not re.search(r'\b(inc|ltd|llp|pvt|llc|technologies|systems|solutions|services|bpm|springboard|infosys|wipro|tcs|google|microsoft|amazon|accenture|capgemini)\b', s2, flags=re.I):
-            return True
-        return False
-
-    if looks_like_person(s):
-        return ""
-    return s
-
-def _save_debug_html(path, page_source):
-    """
-    Robust debug HTML saver:
-    - parse and clean with BeautifulSoup
-    - replace empty nonce attributes with nonce="anon"
-    - remove duplicate CSP <meta http-equiv="Content-Security-Policy"> tags (keep first)
-    - move head-like tags into <head> and other content into <body>
-    - ensure <!doctype html> and <html><head><body>
-    """
-    ensure_data_dir(path)
-    raw = page_source or ""
-
-    # quick replace of empty nonce occurrences before parsing
-    raw = re.sub(r'\snonce\s*=\s*(?:["\']\s*["\']|\s*)', ' nonce="anon"', raw, flags=re.I)
-
-    soup = BeautifulSoup(raw, "html.parser")
-
-    # remove duplicate CSP meta tags
-    csp_metas = soup.find_all("meta", attrs={"http-equiv": lambda v: v and v.lower() == "content-security-policy"})
-    if len(csp_metas) > 1:
-        for extra in csp_metas[1:]:
-            extra.decompose()
-
-    # remove translate attr from html tag (avoid some linter warnings)
-    html_tag = soup.find("html")
-    if html_tag and html_tag.has_attr("translate"):
-        try:
-            del html_tag["translate"]
-        except Exception:
-            pass
-
-    # ensure head/body exist and move top-level head-like tags into head
-    if not soup.head:
-        head = soup.new_tag("head")
-        top_level = list(soup.contents)
-        for el in top_level:
-            if isinstance(el, Doctype) or getattr(el, "name", None) is None:
-                continue
-            tagname = el.name.lower() if getattr(el, "name", None) else ""
-            if tagname in ("meta", "link", "script", "style", "title"):
-                head.append(el.extract())
-        if soup.html:
-            soup.html.insert(0, head)
-        else:
-            new_html = soup.new_tag("html", lang="en")
-            new_html.append(head)
-            body = soup.new_tag("body")
-            for content in list(soup.contents):
-                if content is new_html:
-                    continue
-                body.append(content.extract())
-            new_html.append(body)
-            soup = BeautifulSoup(str(new_html), "html.parser")
-    if not soup.body:
-        body = soup.new_tag("body")
-        for el in list(soup.html.contents):
-            if el is soup.head:
-                continue
-            body.append(el.extract())
-        soup.html.append(body)
-
-    # ensure scripts have a non-empty nonce
-    for s in soup.find_all("script"):
-        if not s.has_attr("nonce") or not str(s.get("nonce")).strip():
-            s["nonce"] = "anon"
-
-    # remove empty attributes
-    for tag in soup.find_all(True):
-        to_del = [k for k, v in tag.attrs.items() if v == "" or v is None]
-        for k in to_del:
-            try:
-                del tag.attrs[k]
-            except Exception:
-                pass
-
-    final_html = str(soup)
-    if "<!doctype" not in final_html.lower():
-        final_html = "<!doctype html>\n" + final_html
-
-    # ensure charset meta exists
-    if soup.head and not soup.head.find("meta", attrs={"charset": True}):
-        charset_tag = soup.new_tag("meta", charset="utf-8")
-        soup.head.insert(0, charset_tag)
-        final_html = "<!doctype html>\n" + str(soup)
-
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(final_html)
+def clean_company_name(company):
+    if not company: return ""
+    company = re.sub(r'\s+', ' ', company).strip()
+    
+    sorted_locs = sorted(COMMON_LOCATIONS, key=len, reverse=True)
+    pattern = r'\s+(' + '|'.join(re.escape(c) for c in sorted_locs) + r')\s*$'
+    
+    while True:
+        new_company = re.sub(pattern, '', company, flags=re.I).strip(' ,;-|•·')
+        if new_company == company or len(new_company) < 3 or new_company.lower().endswith(' of'):
+            break
+        company = new_company
+        
+    return company
 
 def parse_search_results(html):
     soup = BeautifulSoup(html, "lxml")
-    records = []
+    
+    for hidden in soup.select(".visually-hidden, .visually-hidden-text, .a11y-text"):
+        hidden.decompose()
 
+    records = []
     selectors = [
-        "div.reusable-search__result-container",
-        "li.reusable-search__result-container",
+        "li.reusable-search__result-container", 
+        "div.entity-result__item", 
         "div.search-result__wrapper",
-        "div.entity-result__item",
         "div.search-result",
-        "div.result-lockup",
-        "ul.search-results__list li",
-        "div.result-card__contents",
-        "div.search-result__info"
+        "li.search-result__occluded-item",
+        "div.result-card",
+        "div[data-chameleon-result-urn]",
+        "ul.search-results__list > li"
     ]
 
     containers = []
@@ -382,335 +298,250 @@ def parse_search_results(html):
             containers.extend(found)
 
     if not containers:
-        anchors = soup.find_all("a", href=True)
-        seen = set()
-        for a in anchors:
-            href = a["href"].split("?")[0]
-            if "/in/" not in href:
-                continue
-            parent = a.find_parent()
-            if parent and id(parent) not in seen:
-                containers.append(parent)
-                seen.add(id(parent))
+        seen_ids = set()
+        for a in soup.find_all("a", href=True):
+            if "/in/" in a["href"].split("?")[0]:
+                parent = a
+                for _ in range(6):
+                    if parent.parent and parent.parent.name not in ["ul", "body", "html", "main"]:
+                        parent = parent.parent
+                    else:
+                        break
+                if parent and id(parent) not in seen_ids:
+                    containers.append(parent)
+                    seen_ids.add(id(parent))
 
-    for c in containers:
+    for raw_c in containers:
         try:
-            text_block = c.get_text("\n", strip=True) or ""
-            # split into logical lines (preserve order)
-            lines = [ln.strip() for ln in re.split(r'\n|\r|\s{2,}', text_block) if ln.strip()]
+            c = BeautifulSoup(str(raw_c), "html.parser")
+            text_block = c.get_text(" | ", strip=True) or ""
+            text_block = re.sub(r'\s+', ' ', text_block)
+            lines = [ln.strip() for ln in re.split(r'\||\n|\r', text_block) if ln.strip()]
 
-            # profile_url
-            a = c.select_one("a[href*='/in/']")
+            # 1. STRICT PROFILE URL NORMALIZATION
+            link_tag = c.select_one("span.entity-result__title-text a.app-aware-link") or c.select_one("a[href*='/in/']")
             profile_url = ""
-            if a:
-                href = a.get("href").split("?")[0]
-                if href.startswith("/"):
-                    href = urljoin("https://www.linkedin.com", href)
-                profile_url = href
+            if link_tag:
+                raw_href = link_tag.get("href", "").split("?")[0]
+                if raw_href.startswith("/"):
+                    raw_href = urljoin("https://www.linkedin.com", raw_href)
+                
+                # Regex match to strip any trailing slashes or nested paths, standardizing the format
+                match = re.search(r'(https://(?:www\.)?linkedin\.com/in/[^/]+)', raw_href)
+                if match:
+                    profile_url = match.group(1)
+                else:
+                    profile_url = raw_href
 
-            # name extraction - prefer anchor text or dedicated selectors
+            # --- AI PARSING ENGINE ---
+            if USE_AI_PARSER and GROQ_AVAILABLE and GROQ_API_KEY:
+                # Pass the raw text block to the AI
+                ai_extracted = parse_with_ai(text_block)
+                if ai_extracted:
+                    loc = ai_extracted.get("location", "n/a")
+                    # Strict location cleanup: Take only the primary city name
+                    if loc and loc.lower() != "n/a":
+                        loc = loc.split(",")[0].strip()
+                        
+                    role = ai_extracted.get("current_role", "n/a")
+                    comp = ai_extracted.get("current_company", "n/a")
+                    
+                    # Convert to string to avoid errors and clean up trailing spaces
+                    role = str(role).strip() if role else "n/a"
+                    comp = str(comp).strip() if comp else "n/a"
+
+                    records.append({
+                        "profile_url": profile_url or "n/a",
+                        "name": str(ai_extracted.get("name", "n/a")).strip(),
+                        "location": loc or "n/a",
+                        "current_role": role,
+                        "current_company": comp
+                    })
+                    continue # Skip manual regex parsing if AI succeeded
+            # -------------------------
+
+            # --- MANUAL REGEX FALLBACK (Used if AI is disabled or fails) ---
             name = ""
-            if a:
-                name = a.get_text(" ", strip=True)
-            if not name:
-                name_el = (c.select_one("span.entity-result__title-text a span") or
-                           c.select_one("h3") or
-                           c.select_one("span.actor-name") or
-                           c.select_one(".result-card__title") or
-                           c.select_one(".name"))
-                if name_el:
-                    name = name_el.get_text(" ", strip=True)
-            if not name:
-                strong = c.select_one("strong")
-                if strong:
-                    name = strong.get_text(" ", strip=True)
-            if not name and lines:
+            name_span = c.select_one(".entity-result__title-text span[aria-hidden='true']")
+            if name_span:
+                name = name_span.get_text(" ", strip=True)
+            elif link_tag:
+                name = link_tag.get_text(" ", strip=True)
+            elif lines:
                 name = lines[0]
+            
             name = extract_name_from_text(name)
+            
+            if not name and profile_url:
+                parts = profile_url.split("/in/")
+                if len(parts) > 1:
+                    raw_parts = parts[1].strip("/").split("?")[0].split("-")
+                    clean_parts = [p for p in raw_parts if not re.match(r'^[0-9a-fA-F]{5,}$', p)]
+                    name = " ".join(clean_parts[:2]).title()
 
-            # location extraction: multiple strategies
             location = ""
-            # 1) Try common selector(s)
-            loc_el = (c.select_one(".entity-result__secondary-subtitle") or
-                      c.select_one(".search-result__info .subline-level-2") or
-                      c.select_one(".result__meta") or
-                      c.select_one(".location") or
-                      c.select_one(".search-result__location") or
-                      c.select_one(".result-lockup__meta"))
+            loc_el = c.select_one(".entity-result__secondary-subtitle") or c.select_one(".search-result__info .subline-level-2") or c.select_one(".location")
             if loc_el:
-                location = _clean_text(loc_el.get_text(" ", strip=True) or "")
+                loc_text = loc_el.get_text(" | ", strip=True) 
+                loc_text = re.sub(r'\s+', ' ', loc_text)
+                if any(sep in loc_text for sep in ["•", "·", "|"]):
+                    parts = re.split(r'•|·|\|', loc_text)
+                    location = parts[-1].strip()
+                else:
+                    location = loc_text
+                    
+            location = _clean_text(location)
 
-            # 2) If above failed or was empty, use lines heuristics:
-            if not location:
-                # find index of name in lines (best effort)
-                name_index = -1
-                for idx, ln in enumerate(lines):
-                    if name and name.lower() in ln.lower():
-                        name_index = idx
-                        break
-                if name_index == -1:
-                    name_index = 0
-                # examine next few lines for candidate location
-                candidate = ""
-                for j in range(name_index + 1, min(len(lines), name_index + 5)):
-                    ln = lines[j]
-                    low = ln.lower()
-                    if any(skip in low for skip in ("current:", "current", "connect", "mutual", "followers", "follow", "message")):
-                        continue
-                    # prefer lines containing country tokens or a comma (City, State)
-                    if any(token.lower() in low for token in [t.lower() for t in COUNTRY_PREFER]) or ("," in ln and len(ln) < 80):
-                        candidate = ln
-                        break
-                    # else take short lines likely to be location (<6 words)
-                    if len(ln.split()) <= 6 and re.search(r'[A-Za-z]', ln):
-                        candidate = ln
-                        break
-                if candidate:
-                    location = _clean_text(candidate)
-
-            # 3) final fallback: try to find any short line that includes a comma and a capitalized word
             if not location and lines:
                 for ln in lines[:6]:
-                    if "," in ln and len(ln) < 80 and not re.search(r'\b(Current|Past|Connect|mutual|followers)\b', ln, flags=re.I):
+                    if "," in ln and len(ln) < 80 and not any(kw in ln.lower() for kw in ["current", "past", "follower", "mutual"]):
                         location = _clean_text(ln)
                         break
-
-            # current role/company extraction (same as before)
-            current_role = ""
-            current_company = ""
-            possible_nodes = []
-            for tag in c.find_all(["p", "span", "div", "li"], recursive=True):
-                txt = (tag.get_text(" ", strip=True) or "").strip()
-                if not txt:
-                    continue
-                if re.search(r'\bCurrent[:\s]', txt, flags=re.I) or re.search(r'\bat\b', txt):
-                    possible_nodes.append(txt)
-            if possible_nodes:
-                chosen = None
-                for t in possible_nodes:
-                    if 'current' in t.lower():
-                        chosen = t
-                        break
-                if not chosen:
-                    chosen = possible_nodes[0]
-                role, comp = extract_current_from_text(chosen)
-                current_role = role
-                current_company = comp
-            else:
-                prim = c.select_one("div.entity-result__primary-subtitle") or c.select_one("p.subline-level-1") or c.select_one(".entity-result__summary") or c.select_one(".search-result__info .subline-level-1")
-                prim_text = prim.get_text(" ", strip=True) if prim else ""
-                role, comp = extract_current_from_text(prim_text)
-                if role or comp:
-                    current_role = role
-                    current_company = comp
-                else:
-                    # Try multiple heuristics on the raw text lines to extract role/company
-                    role, comp = extract_current_from_text(text_block)
-                    current_role = role
-                    current_company = comp
-
-                    if not current_role and not current_company and lines:
-                        # scan several nearby lines for 'role at company' patterns
-                        for ln in lines[1:6]:
-                            r2, c2 = extract_current_from_text(ln)
-                            if r2 or c2:
-                                if not current_role:
-                                    current_role = r2
-                                if not current_company:
-                                    current_company = c2
-                                break
-
-                    # pattern: 'Role · Company' or 'Company · Role'
-                    if (not current_role or not current_company) and lines:
-                        for ln in lines[:6]:
-                            m = re.split(r'\s+·\s+|\s+•\s+|\s+\|\s+', ln)
-                            if len(m) == 2:
-                                a, b = m[0].strip(), m[1].strip()
-                                # heuristics: shorter phrase with capitals likely a name/role, all-caps or multiword company-like is company
-                                def looks_like_company(s):
-                                    if not s: return False
-                                    keywords = ['inc','ltd','llp','pvt','llc','technologies','systems','solutions','services','infosys','wipro','tcs','google','microsoft','amazon','accenture','capgemini','bpm']
-                                    low = s.lower()
-                                    if any(k in low for k in keywords):
-                                        return True
-                                    # company tends to be multiple words and contain capitalized words
-                                    if len(s.split()) >= 2 and re.search(r'[A-Z]', s):
-                                        return True
-                                    return False
-
-                                if looks_like_company(a) and not current_company:
-                                    current_company = _clean_text(a)
-                                if looks_like_company(b) and not current_company:
-                                    current_company = _clean_text(b)
-                                # if a contains role-like words
-                                if not current_role and re.search(r'\b(manager|engineer|specialist|consultant|director|analyst|lead|officer|developer|architect)\b', a, flags=re.I):
-                                    current_role = _clean_text(a)
-                                if not current_role and re.search(r'\b(manager|engineer|specialist|consultant|director|analyst|lead|officer|developer|architect)\b', b, flags=re.I):
-                                    current_role = _clean_text(b)
-                                if current_role or current_company:
+                
+                if not location:
+                    for i, ln in enumerate(lines[:5]):
+                        if " at " in ln or "Current:" in ln:
+                            if i + 1 < len(lines):
+                                loc_candidate = lines[i+1]
+                                if len(loc_candidate) < 40 and not any(kw in loc_candidate.lower() for kw in ["current", "past", "follower", "mutual"]):
+                                    location = _clean_text(loc_candidate)
                                     break
 
-                    # fallback: if company still empty, find possible company-like short lines
-                    if not current_company and lines:
-                        for ln in lines[1:6]:
-                            low = ln.lower()
-                            if any(k in low for k in ['inc','ltd','llp','pvt','llc','solutions','technologies','systems']) or re.search(r'\b( infosys | wipro | tcs | accenture | capgemini | google | microsoft | amazon )\b', ' '+low+' '):
-                                current_company = _clean_text(ln)
-                                break
+            current_role, current_company = "", ""
+            for ln in lines[:6]:
+                r, comp = extract_current_from_text(ln)
+                if r or comp:
+                    current_role, current_company = r, comp
+                    break
+            
+            if not current_role and not current_company:
+                prim = c.select_one("div.entity-result__primary-subtitle") or c.select_one("p.subline-level-1")
+                prim_text = prim.get_text(" | ", strip=True) if prim else ""
+                r, comp = extract_current_from_text(prim_text.split(" | ")[0] if prim_text else "")
+                if r or comp:
+                    current_role, current_company = r, comp
 
-            # clean fields
-            name = name or ""
-            location = location or ""
-            current_role = current_role or ""
-            current_company = current_company or ""
-            name = _clean_text(name)
-            location = _clean_text(location)
-            current_role = _clean_text(current_role)
-            current_company = _clean_text(current_company)
-
-            # final company cleanup: cut trailing mutual names
-            if current_company:
-                parts = re.split(r'\s+and\s+|,|\s{2,}', current_company, flags=re.I)
-                current_company = _clean_text(parts[0].strip())
-                # remove any embedded person-name fragments such as 'Dr. Name' or the extracted name
-                current_company = strip_name_and_titles_from_company(current_company, name)
+            current_company, location = separate_company_location(current_company, location)
+            
+            current_role = clean_role_name(current_role)
+            current_company = clean_company_name(current_company)
+            
+            # Strict location cleanup: Take only the primary city name
+            if location and location.lower() != "n/a":
+                location = location.split(",")[0].strip()
+            location = re.sub(r'[\u2022•·]', '', location).strip(' ,;-|')
 
             rec = {
-                "profile_url": profile_url or "",
-                "name": name or "",
-                "location": location or "",
-                "current_role": current_role or "",
-                "current_company": current_company or ""
+                "profile_url": profile_url or "n/a",
+                "name": name or "n/a",
+                "location": location or "n/a",
+                "current_role": current_role or "n/a",
+                "current_company": current_company or "n/a"
             }
 
-            # require at least name or profile_url
-            if not rec["name"] and not rec["profile_url"]:
+            if rec["name"] == "n/a" and rec["profile_url"] == "n/a":
                 continue
 
             records.append(rec)
-        except Exception:
+        except Exception as e:
             continue
 
     return records
-
-def wait_for_search_results(driver, timeout=12):
-    try:
-        WebDriverWait(driver, timeout).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "a[href*='/in/'], .reusable-search__result-container, .entity-result__item"))
-        )
-        return True
-    except TimeoutException:
-        return False
 
 def scrape_keyword(keyword, headless=False, limit_records=MAX_RECORDS):
     driver = None
     try:
         clear_output_csv()
+        print("[INFO] Starting Chrome Driver...", flush=True)
+        driver = start_driver(headless=headless)
 
-        try:
-            driver = start_driver(headless=headless, use_persistent_profile=True,
-                                  user_data_dir=USER_DATA_DIR, profile_dir=PROFILE_DIR)
-        except Exception as e:
-            print("[WARN] Persistent profile failed; falling back to temporary profile. Exception:", e)
-            traceback.print_exc()
-            try:
-                import subprocess
-                subprocess.run(["taskkill", "/F", "/IM", "chrome.exe"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except Exception:
-                pass
-            driver = start_driver(headless=headless, use_persistent_profile=False, user_data_dir=None, profile_dir=None)
-            print("[INFO] Started Chrome with temporary profile (no persistence).")
+        load_cookies(driver, COOKIE_FILE)
 
-        search_url = build_search_url(keyword)
-        print("[DEBUG] Navigating to search URL:", search_url)
-        try:
-            driver.get("about:blank")
-            time.sleep(0.5)
-            driver.get(search_url)
-            time.sleep(1.0)
-            try:
-                driver.execute_script("window.location.href = arguments[0];", search_url)
-            except Exception:
-                pass
-            time.sleep(1.0)
-            try:
-                driver.refresh()
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-        debug_path = os.path.join(DEBUG_DIR, "debug_after_nav.html")
-        _save_debug_html(debug_path, driver.page_source)
-
-        print("[DEBUG] current_url:", driver.current_url)
-        print("[DEBUG] title:", driver.title)
-        print("[DEBUG] Saved snapshot ->", debug_path)
-
-        if looks_like_login_page(driver):
-            ok = prompt_manual_login(driver)
-            if not ok:
-                print("[ERROR] Manual login aborted.")
-                return []
-
-        ok = wait_for_search_results(driver, timeout=12)
-        if not ok:
-            print("[WARN] No visible search results detected. Saved page for inspection.")
-            _save_debug_html(os.path.join(DEBUG_DIR, "debug_search.html"), driver.page_source)
-            return []
-
-        scroll_page(driver, times=SCROLL_PAUSES)
-
-        html = driver.page_source
-        records = parse_search_results(html)
-        print(f"[INFO] Parsed {len(records)} records from search results.")
-
-        # dedupe and normalize (fill n/a)
+        search_url_base = build_search_url(keyword)
+        
         seen = set()
         cleaned = []
-        for r in records:
-            key = r.get("profile_url") or r.get("name","")
-            key = key.strip()
-            if not key:
-                continue
-            if key in seen:
-                continue
-            seen.add(key)
-            # only include this person if at least one of location/role/company is present
-            if not (r.get("location") or r.get("current_role") or r.get("current_company")):
-                continue
-            cleaned_rec = {
-                "profile_url": r.get("profile_url","") or "n/a",
-                "name": r.get("name","") or "n/a",
-                "location": r.get("location","") or "n/a",
-                "current_role": r.get("current_role","") or "n/a",
-                "current_company": r.get("current_company","") or "n/a"
-            }
-            cleaned.append(cleaned_rec)
+        page = 1
+        
+        # Loop through pages until we reach the exact limit_records
+        while len(cleaned) < limit_records and page <= 20:
+            search_url = search_url_base
+            if page > 1:
+                search_url += f"&page={page}"
+                
+            print(f"\n[DEBUG] Navigating to: {search_url} (Page {page})", flush=True)
+            
+            # HARD RESET DOM to prevent fast-scraping caching issues on SPA
+            driver.get("data:,")
+            time.sleep(1.0)
+            driver.get(search_url)
+            time.sleep(4.0)
 
-        print(f"[INFO] {len(records)} raw -> {len(cleaned)} unique records after dedupe. Saving up to {limit_records} rows.")
+            # CHECK FOR LOGIN WALL / BROKEN COOKIES
+            if looks_like_login_page(driver):
+                print("[ERROR] 🛑 LinkedIn blocked access! Your cookies are expired or invalid.", flush=True)
+                err_path = os.path.join(DEBUG_DIR, "debug_login_error.html")
+                with open(err_path, "w", encoding="utf-8") as f:
+                    f.write(driver.page_source)
+                print(f"[INFO] Saved error page to: {err_path}", flush=True)
+                break
 
-        for rec in cleaned[:limit_records]:
+            print(f"[INFO] Waiting for results to load on page {page}...", flush=True)
+            try:
+                WebDriverWait(driver, 12).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "a[href*='/in/'], .reusable-search__result-container, .entity-result__item"))
+                )
+            except TimeoutException:
+                print(f"[WARN] Search results timed out on page {page}. Proceeding to parse whatever is on the screen.", flush=True)
+
+            print(f"[INFO] Scrolling page {page} to load dynamic content...", flush=True)
+            scroll_page(driver, times=SCROLL_PAUSES)
+
+            html = driver.page_source
+            records = parse_search_results(html)
+            print(f"[INFO] Successfully parsed {len(records)} raw records from HTML on page {page}.", flush=True)
+
+            # CHECK FOR ZERO RESULTS
+            if len(records) == 0:
+                if page == 1:
+                    err_path = os.path.join(DEBUG_DIR, "debug_no_results.html")
+                    with open(err_path, "w", encoding="utf-8") as f:
+                        f.write(driver.page_source)
+                    print(f"[WARN] ⚠️ Found 0 results. LinkedIn may have altered the layout for your account. Saved HTML snapshot to: {err_path}", flush=True)
+                else:
+                    print(f"[INFO] No more results found at page {page}. Reached the end.", flush=True)
+                break
+
+            new_adds_this_page = 0
+            for r in records:
+                key = r.get("profile_url")
+                if not key or key in seen or key == "n/a":
+                    continue
+                seen.add(key)
+                cleaned.append(r)
+                new_adds_this_page += 1
+                
+                # Stop exactly when we reach the requested limit
+                if len(cleaned) >= limit_records:
+                    break
+
+            if new_adds_this_page == 0:
+                print(f"[WARN] ⚠️ No NEW unique profiles found on page {page}. Stopping pagination to prevent loops.", flush=True)
+                break
+            
+            page += 1
+            polite_sleep() # Small polite delay before hitting the next page
+
+        print(f"\n[INFO] Saving {len(cleaned)} unique records to CSV...", flush=True)
+        for rec in cleaned:
             append_pretty_csv_row(OUTPUT_CSV, rec, fieldnames=CSV_FIELDS)
-            polite_sleep()
 
-        return cleaned[:limit_records]
+        return cleaned
 
     finally:
         if driver:
             try:
                 driver.quit()
+                print("[INFO] Chrome Driver successfully closed.", flush=True)
             except Exception:
                 pass
-
-def main():
-    print("== LinkedIn public search scraper (Selenium) ==")
-    keyword = input("Enter search keywords (e.g. 'Sales Manager India'): ").strip()
-    if not keyword:
-        print("No keyword provided. Exiting.")
-        return
-    scrape_keyword(keyword, headless=False, limit_records=MAX_RECORDS)
-    print("Done. Check data/output.csv or data/debug_after_nav.html for debug output.")
-
-if __name__ == "__main__":
-    main()

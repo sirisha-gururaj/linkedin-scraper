@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyc
 
 # Virtual environments
 .venv/
@@ -56,3 +57,5 @@ data/*.html
 *.pyc
 *.sqlite3
 *.db
+
+cookies.json

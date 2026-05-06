@@ -1,88 +1,70 @@
-# LinkedIn Public Search Scraper (Selenium)
+# LinkedIn Scraper
 
-This project scrapes **only public LinkedIn search-result cards** (not full profiles) and extracts:
+Scrapes public LinkedIn people search results and saves the extracted data to CSV. The project includes a command-line scraper and a Flask web UI.
 
-- `profile_url`
-- `name`
-- `location`
-- `current_role`
-- `current_company`
+## What It Does
 
-It **does NOT open profiles**, so **no “profile viewed” notifications** are generated.
+- Takes a company name or search keyword
+- Opens LinkedIn people search results
+- Extracts `profile_url`, `name`, `location`, `current_role`, and `current_company`
+- Saves results to `data/output.csv`
+- Uses optional Groq parsing when `GROQ_API_KEY` is set
 
----
+## Requirements
 
-## Setup (Windows)
+- Python 3.10+
+- Google Chrome
+- A LinkedIn account with access to search results
+- Optional: `GROQ_API_KEY` for AI-assisted parsing
 
-### 1. Environment Setup
+## Setup
 
 ```bash
-# 1. Create virtual environment
 python -m venv .venv
 .venv\Scripts\activate
-
-# 2. Install dependencies
-pip install selenium chromedriver-autoinstaller beautifulsoup4 lxml
+pip install -r requirements.txt
 ```
-### 2. Create a separate Chrome profile (Required)
 
-Run the following in PowerShell:
+## Configuration
 
-```bash
-taskkill /F /IM chrome.exe        # close Chrome
-$P="C:\Users\<YOU>\ChromeSeleniumProfile"
-Remove-Item $P -Recurse -Force -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Path $P
-```
-### Why? 
-LinkedIn requires login to show search results. Using a separate profile keeps your main Chrome untouched and allows Selenium to reuse a logged-in session.
+- Set `GROQ_API_KEY` in your environment or `.env` file if you want AI parsing
+- Update `USER_DATA_DIR` and `PROFILE_DIR` in `src/main_selenium.py` if you want to use a custom Chrome profile
+- Keep the same profile folder between runs so LinkedIn login cookies can be reused
 
-### IMPORTANT
+## Run
 
-After creating the folder you must update your script (main_selenium.py) and replace:
-```bash
-USER_DATA_DIR = r"C:\Users\Sirisha G\ChromeSeleniumProfile"
-PROFILE_DIR   = "Default"
-```
-with your own:
-```bash
-USER_DATA_DIR = r"C:\Users\<YOU>\ChromeSeleniumProfile"
-PROFILE_DIR   = "Default"
-```
-Both variable names must match exactly:
-* USER_DATA_DIR → your folder path
-* PROFILE_DIR → usually "Default"
-
-### 3. Usage
+CLI scraper:
 
 ```bash
 python src\main_selenium.py
 ```
-1. A Chrome window opens using the Selenium profile.
-2. Login to LinkedIn once, then return to the terminal and press Enter.
-3. Future runs will not require login unless cookies expire.
 
-### 4. Output
+Web UI:
 
-Results are saved to: data/output.csv
-* The file is cleared automatically on each run.
-* Missing fields appear as n/a.
+```bash
+python src\ui.py
+```
 
-### 5. Limitations
+## Output
 
-* Only public information visible on the search-results page is scraped.
-* Private or restricted profiles cannot be accessed.
-* LinkedIn blocks non-public data for logged-out or programmatic views.
+- Main results: `data/output.csv`
+- Debug snapshots: `data/`
 
-### 6. Files
+## Project Structure
 
-* src/main_selenium.py           # main script
-* data/output.csv                # results
-* data/debug_after_nav.html      # debug snapshots
+- `src/main_selenium.py` - Selenium scraper
+- `src/main.py` - non-Selenium scraper variant
+- `src/ui.py` - Flask web interface
+- `src/fetcher.py` - HTTP fetch helper
+- `src/parser.py` - profile parsing logic
+- `src/util.py` - CSV saving helper
+- `templates/` - HTML templates
+- `static/` - CSS and JavaScript assets
+- `data/` - output and debug files
 
-### 7. Notes
+## Notes
 
-* Safe: The script never opens profile pages → no notifications sent.
-* Debug: HTML is sanitized so VS Code shows no errors.
-* Troubleshooting: If results look empty, delete the profile folder & re-login once.
+- The scraper only targets public search-result data
+- It does not open profile pages directly
+- Empty or invalid results usually mean the session cookies or Chrome profile need to be refreshed
 
