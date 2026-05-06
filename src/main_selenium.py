@@ -107,15 +107,31 @@ def start_driver(headless=False):
     options.add_argument("--disable-software-rasterizer")
     options.add_argument("--blink-settings=imagesEnabled=false") # CRITICAL: Don't load heavy images
     
-    # --- ANTI-BOT & HEADLESS DETECTION BYPASS ---
+    # --- ULTIMATE ANTI-BOT & HEADLESS DETECTION BYPASS ---
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option('useAutomationExtension', False)
+    options.add_argument("--accept-lang=en-US,en;q=0.9") # Spoof typical browser language headers
+    
     # Spoof a real Windows Chrome browser so LinkedIn doesn't know we are on a headless cloud server
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
     
     service = Service()
-    return webdriver.Chrome(service=service, options=options)
+    driver = webdriver.Chrome(service=service, options=options)
+    
+    # Execute Chrome DevTools Protocol to completely wipe out the webdriver signature
+    try:
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+            "source": """
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                });
+            """
+        })
+    except Exception:
+        pass
+        
+    return driver
 
 def load_cookies(driver, default_cookie_path):
     # Detect if we are running in Render Docker and use the secret mount path
@@ -495,7 +511,8 @@ def scrape_keyword(keyword, headless=False, limit_records=MAX_RECORDS):
 
             print(f"[INFO] Waiting for results to load on page {page}...", flush=True)
             try:
-                WebDriverWait(driver, 12).until(
+                # Increased timeout to 20 seconds for slower Render cloud environments
+                WebDriverWait(driver, 20).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, "a[href*='/in/'], .reusable-search__result-container, .entity-result__item"))
                 )
             except TimeoutException:
