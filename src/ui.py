@@ -4,15 +4,20 @@ import os
 import csv
 import sys
 
-# Bulletproof path resolving (works whether run from src/ or root)
+# Bulletproof path resolving
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if os.path.basename(current_dir) == "src":
     BASE_DIR = os.path.abspath(os.path.join(current_dir, ".."))
 else:
     BASE_DIR = current_dir
 
+# Add root folder to paths
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
+
+# CRITICAL FIX FOR RENDER: Tell Gunicorn to also look inside the 'src' folder!
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
 
 import main_selenium as ms
 
