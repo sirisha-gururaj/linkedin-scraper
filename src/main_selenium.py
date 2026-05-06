@@ -49,8 +49,6 @@ COOKIE_FILE = os.path.join(BASE_DIR, "cookies.json")
 DELAY_MIN = 0.6
 DELAY_MAX = 1.2
 SCROLL_PAUSES = 6
-USER_DATA_DIR = os.path.expanduser("~/.config/Selenium/ChromeProfile")
-PROFILE_DIR = "Default"
 MAX_RECORDS = 200
 CSV_FIELDS = ["profile_url", "name", "location", "current_role", "current_company"]
 
@@ -93,20 +91,32 @@ def build_search_url(keyword):
     q = quote_plus(keyword)
     return f"https://www.linkedin.com/search/results/people/?keywords={q}&origin=GLOBAL_SEARCH_HEADER"
 
-def start_driver(headless=False, use_persistent_profile=False):
+def start_driver(headless=False):
     options = webdriver.ChromeOptions()
     if headless:
         options.add_argument("--headless=new")
         options.add_argument("--window-size=1920,1080")
+    
+    # ----------------------------------------------------
+    # AGGRESSIVE MEMORY OPTIMIZATIONS FOR RENDER FREE TIER
+    # ----------------------------------------------------
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-extensions")
+    options.add_argument("--disable-software-rasterizer")
+    options.add_argument("--blink-settings=imagesEnabled=false") # CRITICAL: Don't load heavy images
+    options.page_load_strategy = 'eager' # Don't wait for tracking scripts/ads to load
     
     service = Service()
     return webdriver.Chrome(service=service, options=options)
 
-def load_cookies(driver, cookie_path):
+def load_cookies(driver, default_cookie_path):
+    # Detect if we are running in Render Docker and use the secret mount path
+    cookie_path = default_cookie_path
+    if os.environ.get("RENDER") and os.path.exists("/etc/secrets/cookies.json"):
+        cookie_path = "/etc/secrets/cookies.json"
+
     print(f"[INFO] Loading cookies from: {cookie_path}", flush=True)
     try:
         driver.get("https://www.linkedin.com")
@@ -160,17 +170,17 @@ def parse_with_ai(raw_text):
         If a field cannot be safely determined, output "n/a" for that field.
 
         CRITICAL Formatting Rules:
-        1. "name": Clean full name ONLY. No prefixes, titles, or suffixes (e.g., return "John Doe", not "Dr. John Doe Ph.D").
-        2. "current_role": ONLY the core job title (e.g., "Software Engineer", "Manager"). NEVER include the company name, department, or locations here. Remove anything after a hyphen (-), pipe (|), or "at".
+        1. "name": Clean full name ONLY. No prefixes, titles, or suffixes.
+        2. "current_role": ONLY the core job title. NEVER include the company name, department, or locations here. Remove anything after a hyphen (-), pipe (|), or "at".
         3. "current_company": ONLY the primary company name. Strip out "Inc", "LLC", "Pvt", "Ltd", or any city names attached to it.
-        4. "location": ONLY the primary city name (e.g., "Bengaluru", "San Francisco"). Strip out all states, countries, or regions like "Karnataka", "India", "Greater", "Area".
+        4. "location": ONLY the primary city name (e.g., "Bengaluru", "San Francisco"). Strip out all states, countries, or regions.
         
         Raw Text:
         {raw_text}
         """
         
         response = client.chat.completions.create(
-            model="llama3-8b-8192",  # Fast and excellent for JSON extraction
+            model="llama3-8b-8192", 
             messages=[
                 {"role": "system", "content": "You are a strict data extraction assistant. You output ONLY valid JSON format."},
                 {"role": "user", "content": prompt}
@@ -326,7 +336,6 @@ def parse_search_results(html):
                 if raw_href.startswith("/"):
                     raw_href = urljoin("https://www.linkedin.com", raw_href)
                 
-                # Regex match to strip any trailing slashes or nested paths, standardizing the format
                 match = re.search(r'(https://(?:www\.)?linkedin\.com/in/[^/]+)', raw_href)
                 if match:
                     profile_url = match.group(1)
@@ -335,18 +344,15 @@ def parse_search_results(html):
 
             # --- AI PARSING ENGINE ---
             if USE_AI_PARSER and GROQ_AVAILABLE and GROQ_API_KEY:
-                # Pass the raw text block to the AI
                 ai_extracted = parse_with_ai(text_block)
                 if ai_extracted:
                     loc = ai_extracted.get("location", "n/a")
-                    # Strict location cleanup: Take only the primary city name
                     if loc and loc.lower() != "n/a":
                         loc = loc.split(",")[0].strip()
                         
                     role = ai_extracted.get("current_role", "n/a")
                     comp = ai_extracted.get("current_company", "n/a")
                     
-                    # Convert to string to avoid errors and clean up trailing spaces
                     role = str(role).strip() if role else "n/a"
                     comp = str(comp).strip() if comp else "n/a"
 
@@ -357,10 +363,10 @@ def parse_search_results(html):
                         "current_role": role,
                         "current_company": comp
                     })
-                    continue # Skip manual regex parsing if AI succeeded
+                    continue 
             # -------------------------
 
-            # --- MANUAL REGEX FALLBACK (Used if AI is disabled or fails) ---
+            # --- MANUAL REGEX FALLBACK ---
             name = ""
             name_span = c.select_one(".entity-result__title-text span[aria-hidden='true']")
             if name_span:
@@ -426,7 +432,6 @@ def parse_search_results(html):
             current_role = clean_role_name(current_role)
             current_company = clean_company_name(current_company)
             
-            # Strict location cleanup: Take only the primary city name
             if location and location.lower() != "n/a":
                 location = location.split(",")[0].strip()
             location = re.sub(r'[\u2022•·]', '', location).strip(' ,;-|')
@@ -463,21 +468,17 @@ def scrape_keyword(keyword, headless=False, limit_records=MAX_RECORDS):
         cleaned = []
         page = 1
         
-        # Loop through pages until we reach the exact limit_records
         while len(cleaned) < limit_records and page <= 20:
             search_url = search_url_base
             if page > 1:
                 search_url += f"&page={page}"
                 
             print(f"\n[DEBUG] Navigating to: {search_url} (Page {page})", flush=True)
-            
-            # HARD RESET DOM to prevent fast-scraping caching issues on SPA
             driver.get("data:,")
             time.sleep(1.0)
             driver.get(search_url)
             time.sleep(4.0)
 
-            # CHECK FOR LOGIN WALL / BROKEN COOKIES
             if looks_like_login_page(driver):
                 print("[ERROR] 🛑 LinkedIn blocked access! Your cookies are expired or invalid.", flush=True)
                 err_path = os.path.join(DEBUG_DIR, "debug_login_error.html")
@@ -501,7 +502,6 @@ def scrape_keyword(keyword, headless=False, limit_records=MAX_RECORDS):
             records = parse_search_results(html)
             print(f"[INFO] Successfully parsed {len(records)} raw records from HTML on page {page}.", flush=True)
 
-            # CHECK FOR ZERO RESULTS
             if len(records) == 0:
                 if page == 1:
                     err_path = os.path.join(DEBUG_DIR, "debug_no_results.html")
@@ -521,7 +521,6 @@ def scrape_keyword(keyword, headless=False, limit_records=MAX_RECORDS):
                 cleaned.append(r)
                 new_adds_this_page += 1
                 
-                # Stop exactly when we reach the requested limit
                 if len(cleaned) >= limit_records:
                     break
 
@@ -530,7 +529,7 @@ def scrape_keyword(keyword, headless=False, limit_records=MAX_RECORDS):
                 break
             
             page += 1
-            polite_sleep() # Small polite delay before hitting the next page
+            polite_sleep() 
 
         print(f"\n[INFO] Saving {len(cleaned)} unique records to CSV...", flush=True)
         for rec in cleaned:

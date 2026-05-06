@@ -26,5 +26,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 7. Tell Selenium exactly where Chrome is installed in Linux
 ENV CHROME_BIN=/usr/bin/google-chrome
 
-# 8. Start the Flask app using Gunicorn on the port Render gives us
-CMD gunicorn --bind 0.0.0.0:$PORT "src.ui:app"
+# 8. CRITICAL RENDER FIX: Restrict Gunicorn to exactly 1 memory worker to prevent RAM overload (OOM kills)
+CMD gunicorn --workers 1 --threads 2 --bind 0.0.0.0:$PORT "src.ui:app"
