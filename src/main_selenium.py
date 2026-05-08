@@ -106,9 +106,6 @@ def start_driver(headless=False):
     options.add_argument("--no-zygote")         # Prevent hidden background crashes in Docker
     options.add_argument("--single-process")    # Limit memory usage in Docker
     
-    # CRITICAL: Stop loading the page as soon as HTML/Text appears (skips heavy tracking scripts)
-    options.page_load_strategy = 'eager' 
-    
     # ULTIMATE ANTI-BOT & HEADLESS DETECTION BYPASS
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
@@ -153,8 +150,9 @@ def load_cookies(driver, default_cookie_path):
             count = 0
             for cookie in cookies:
                 try:
-                    # ONLY inject the safe, core networking and auth cookies
-                    if cookie["name"] not in ["li_at", "JSESSIONID", "bcookie", "bscookie", "lidc"]:
+                    # CRITICAL FIX: Only inject li_at and JSESSIONID again! 
+                    # Re-introducing routing cookies breaks the Cloud server session!
+                    if cookie["name"] not in ["li_at", "JSESSIONID"]:
                         continue
                     
                     clean_cookie = {
@@ -167,7 +165,7 @@ def load_cookies(driver, default_cookie_path):
                     count += 1
                 except Exception as e:
                     pass
-            print(f"[INFO] Successfully injected {count} core auth/network cookies!", flush=True)
+            print(f"[INFO] Successfully injected {count} core auth cookies!", flush=True)
         else:
             print(f"[WARN] No cookie file found at {cookie_path}! Proceeding without login.", flush=True)
     except Exception as e:
