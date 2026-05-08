@@ -103,7 +103,6 @@ def start_driver(headless=False):
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-extensions")
     options.add_argument("--disable-software-rasterizer")
-    options.add_argument("--blink-settings=imagesEnabled=false") # CRITICAL: Don't load heavy images
     
     # ULTIMATE ANTI-BOT & HEADLESS DETECTION BYPASS
     options.add_argument("--disable-blink-features=AutomationControlled")
@@ -135,9 +134,10 @@ def load_cookies(driver, default_cookie_path):
 
     print(f"[INFO] Loading cookies from: {cookie_path}", flush=True)
     try:
-        driver.get("https://www.linkedin.com")
+        # CRITICAL FIX: Go to a static page (robots.txt) that CANNOT REDIRECT to safely set the cookies
+        driver.get("https://www.linkedin.com/robots.txt")
         time.sleep(2)
-        driver.delete_all_cookies() # FIX: Wipe slate clean to prevent ERR_TOO_MANY_REDIRECTS
+        driver.delete_all_cookies() 
         
         if os.path.exists(cookie_path):
             with open(cookie_path, "r") as f:
@@ -145,30 +145,22 @@ def load_cookies(driver, default_cookie_path):
             count = 0
             for cookie in cookies:
                 try:
-                    if 'domain' in cookie and 'linkedin.com' not in cookie['domain']:
+                    # CRITICAL FIX 2: ONLY inject the authentication cookies!
+                    # Injecting routing cookies (lidc, bcookie) causes ERR_TOO_MANY_REDIRECTS loops!
+                    if cookie["name"] not in ["li_at", "JSESSIONID"]:
                         continue
                     
-                    # FIX: Rebuild cookie perfectly so Chrome never gets confused
                     clean_cookie = {
                         "name": cookie["name"],
                         "value": cookie["value"],
-                        "domain": cookie.get("domain", ".linkedin.com"),
-                        "path": cookie.get("path", "/")
+                        "domain": ".linkedin.com",
+                        "path": "/"
                     }
-                    if "expirationDate" in cookie:
-                        clean_cookie["expiry"] = int(cookie["expirationDate"])
-                    elif "expiry" in cookie:
-                        clean_cookie["expiry"] = int(cookie["expiry"])
-                    if "secure" in cookie:
-                        clean_cookie["secure"] = cookie["secure"]
-                    
                     driver.add_cookie(clean_cookie)
                     count += 1
                 except Exception as e:
                     pass
-            driver.refresh()
-            time.sleep(3)
-            print(f"[INFO] Successfully injected {count} clean cookies!", flush=True)
+            print(f"[INFO] Successfully injected {count} core auth cookies!", flush=True)
         else:
             print(f"[WARN] No cookie file found at {cookie_path}! Proceeding without login.", flush=True)
     except Exception as e:
@@ -507,10 +499,8 @@ def scrape_keyword(keyword, headless=False, limit_records=MAX_RECORDS):
                 search_url += f"&page={page}"
                 
             print(f"\n[DEBUG] Navigating to: {search_url} (Page {page})", flush=True)
-            driver.get("data:,")
-            time.sleep(1.0)
             driver.get(search_url)
-            time.sleep(4.0)
+            time.sleep(5.0)
 
             if looks_like_login_page(driver):
                 print("[ERROR] 🛑 LinkedIn blocked access! Your cookies are expired or invalid.", flush=True)
@@ -522,6 +512,7 @@ def scrape_keyword(keyword, headless=False, limit_records=MAX_RECORDS):
 
             print(f"[INFO] Waiting for results to load on page {page}...", flush=True)
             try:
+                # Increased timeout to 20 seconds for slower Render cloud environments
                 WebDriverWait(driver, 20).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, "a[href*='/in/'], .reusable-search__result-container, .entity-result__item"))
                 )
