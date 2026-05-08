@@ -103,6 +103,11 @@ def start_driver(headless=False):
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-extensions")
     options.add_argument("--disable-software-rasterizer")
+    options.add_argument("--no-zygote")         # Prevent hidden background crashes in Docker
+    options.add_argument("--single-process")    # Limit memory usage in Docker
+    
+    # CRITICAL: Stop loading the page as soon as HTML/Text appears (skips heavy tracking scripts)
+    options.page_load_strategy = 'eager' 
     
     # ULTIMATE ANTI-BOT & HEADLESS DETECTION BYPASS
     options.add_argument("--disable-blink-features=AutomationControlled")
@@ -113,6 +118,9 @@ def start_driver(headless=False):
     
     service = Service()
     driver = webdriver.Chrome(service=service, options=options)
+    
+    # CRITICAL: Force a strict 45-second timeout so it NEVER freezes forever again
+    driver.set_page_load_timeout(45)
     
     try:
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
@@ -134,7 +142,7 @@ def load_cookies(driver, default_cookie_path):
 
     print(f"[INFO] Loading cookies from: {cookie_path}", flush=True)
     try:
-        # CRITICAL FIX: Go to a static page (robots.txt) that CANNOT REDIRECT to safely set the cookies
+        # Go to a static page that CANNOT REDIRECT to safely set the cookies
         driver.get("https://www.linkedin.com/robots.txt")
         time.sleep(2)
         driver.delete_all_cookies() 
@@ -145,9 +153,8 @@ def load_cookies(driver, default_cookie_path):
             count = 0
             for cookie in cookies:
                 try:
-                    # CRITICAL FIX 2: ONLY inject the authentication cookies!
-                    # Injecting routing cookies (lidc, bcookie) causes ERR_TOO_MANY_REDIRECTS loops!
-                    if cookie["name"] not in ["li_at", "JSESSIONID"]:
+                    # ONLY inject the safe, core networking and auth cookies
+                    if cookie["name"] not in ["li_at", "JSESSIONID", "bcookie", "bscookie", "lidc"]:
                         continue
                     
                     clean_cookie = {
@@ -160,7 +167,7 @@ def load_cookies(driver, default_cookie_path):
                     count += 1
                 except Exception as e:
                     pass
-            print(f"[INFO] Successfully injected {count} core auth cookies!", flush=True)
+            print(f"[INFO] Successfully injected {count} core auth/network cookies!", flush=True)
         else:
             print(f"[WARN] No cookie file found at {cookie_path}! Proceeding without login.", flush=True)
     except Exception as e:
@@ -499,8 +506,13 @@ def scrape_keyword(keyword, headless=False, limit_records=MAX_RECORDS):
                 search_url += f"&page={page}"
                 
             print(f"\n[DEBUG] Navigating to: {search_url} (Page {page})", flush=True)
-            driver.get(search_url)
-            time.sleep(5.0)
+            try:
+                driver.get("data:,")
+                time.sleep(1.0)
+                driver.get(search_url)
+                time.sleep(4.0)
+            except TimeoutException:
+                print(f"[WARN] Page load took too long, proceeding to parse anyway...", flush=True)
 
             if looks_like_login_page(driver):
                 print("[ERROR] 🛑 LinkedIn blocked access! Your cookies are expired or invalid.", flush=True)
@@ -512,7 +524,7 @@ def scrape_keyword(keyword, headless=False, limit_records=MAX_RECORDS):
 
             print(f"[INFO] Waiting for results to load on page {page}...", flush=True)
             try:
-                # Increased timeout to 20 seconds for slower Render cloud environments
+                # This ensures we wait for the actual results to appear before scrolling
                 WebDriverWait(driver, 20).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, "a[href*='/in/'], .reusable-search__result-container, .entity-result__item"))
                 )
