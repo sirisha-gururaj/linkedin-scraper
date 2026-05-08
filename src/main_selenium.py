@@ -137,28 +137,38 @@ def load_cookies(driver, default_cookie_path):
     try:
         driver.get("https://www.linkedin.com")
         time.sleep(2)
+        driver.delete_all_cookies() # FIX: Wipe slate clean to prevent ERR_TOO_MANY_REDIRECTS
+        
         if os.path.exists(cookie_path):
             with open(cookie_path, "r") as f:
                 cookies = json.load(f)
             count = 0
             for cookie in cookies:
                 try:
-                    # FIX: Forcefully remove bad formatting from browser extensions so Selenium accepts them
                     if 'domain' in cookie and 'linkedin.com' not in cookie['domain']:
                         continue
                     
-                    cookie.pop('sameSite', None)
-                    cookie.pop('storeId', None)
-                    cookie.pop('hostOnly', None)
-                    cookie.pop('session', None)
+                    # FIX: Rebuild cookie perfectly so Chrome never gets confused
+                    clean_cookie = {
+                        "name": cookie["name"],
+                        "value": cookie["value"],
+                        "domain": cookie.get("domain", ".linkedin.com"),
+                        "path": cookie.get("path", "/")
+                    }
+                    if "expirationDate" in cookie:
+                        clean_cookie["expiry"] = int(cookie["expirationDate"])
+                    elif "expiry" in cookie:
+                        clean_cookie["expiry"] = int(cookie["expiry"])
+                    if "secure" in cookie:
+                        clean_cookie["secure"] = cookie["secure"]
                     
-                    driver.add_cookie(cookie)
+                    driver.add_cookie(clean_cookie)
                     count += 1
                 except Exception as e:
                     pass
             driver.refresh()
             time.sleep(3)
-            print(f"[INFO] Successfully injected {count} cookies!", flush=True)
+            print(f"[INFO] Successfully injected {count} clean cookies!", flush=True)
         else:
             print(f"[WARN] No cookie file found at {cookie_path}! Proceeding without login.", flush=True)
     except Exception as e:
@@ -512,7 +522,6 @@ def scrape_keyword(keyword, headless=False, limit_records=MAX_RECORDS):
 
             print(f"[INFO] Waiting for results to load on page {page}...", flush=True)
             try:
-                # Increased timeout to 20 seconds for slower Render cloud environments
                 WebDriverWait(driver, 20).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, "a[href*='/in/'], .reusable-search__result-container, .entity-result__item"))
                 )
